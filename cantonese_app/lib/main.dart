@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
+import 'route_observer.dart';
 import 'screens/translate_screen.dart';
+import 'screens/annotate_screen.dart';
 import 'screens/explain_screen.dart';
-import 'screens/settings_screen.dart';
-
 void main() {
   runApp(const CantoneseApp());
 }
@@ -13,7 +13,8 @@ class CantoneseApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '粤语学习助手',
+      title: '粤学通',
+      navigatorObservers: [appRouteObserver],
       theme: ThemeData(
         primarySwatch: Colors.red,
         useMaterial3: true,
@@ -40,6 +41,7 @@ class _HomePageState extends State<HomePage> {
 
   final List<Widget> _screens = const [
     TranslateScreen(),
+    AnnotateScreen(),
     ExplainScreen(),
   ];
 
@@ -60,26 +62,21 @@ class _HomePageState extends State<HomePage> {
         },
         selectedItemColor: Colors.red,
         unselectedItemColor: Colors.grey,
+        type: BottomNavigationBarType.fixed,
         items: const [
           BottomNavigationBarItem(
             icon: Icon(Icons.translate),
             label: '翻译',
           ),
           BottomNavigationBarItem(
+            icon: Icon(Icons.subtitles),
+            label: '注音',
+          ),
+          BottomNavigationBarItem(
             icon: Icon(Icons.help_outline),
             label: '解释',
           ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (context) => const SettingsScreen()),
-          );
-        },
-        backgroundColor: Colors.red,
-        child: const Icon(Icons.settings, color: Colors.white),
       ),
     );
   }

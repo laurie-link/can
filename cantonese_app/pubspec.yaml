@@ -87,6 +87,8 @@ flutter_launcher_icons:
   ios: true
   image_path: assets/logo.png
   min_sdk_android: 21
+  # App Store 不接受带透明通道的图标；生成 iOS 图标时去除 alpha
+  remove_alpha_ios: true
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

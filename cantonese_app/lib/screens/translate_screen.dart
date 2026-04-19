@@ -1,7 +1,13 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../app_constants.dart';
+import '../route_observer.dart';
 import '../services/api_service.dart';
+import 'settings_screen.dart';
 
 class TranslateScreen extends StatefulWidget {
   const TranslateScreen({super.key});
@@ -10,7 +16,7 @@ class TranslateScreen extends StatefulWidget {
   State<TranslateScreen> createState() => _TranslateScreenState();
 }
 
-class _TranslateScreenState extends State<TranslateScreen> {
+class _TranslateScreenState extends State<TranslateScreen> with RouteAware {
   final TextEditingController _textController = TextEditingController();
   final ApiService _apiService = ApiService();
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -30,10 +36,21 @@ class _TranslateScreenState extends State<TranslateScreen> {
   String? _audioUrl;
   String? _slangAudioUrl;
 
+  /// 俚语模式流式时的原始输出（JSON 文本），完成后清空并解析到 _cantonese 等
+  String _streamRaw = '';
+
+  String _reasoningText = '';
+  bool _showTranslateReasoning = true;
+  int _translateReasoningDepth = 2;
+  int _translateElapsedSec = 0;
+  Timer? _translateElapsedTimer;
+
   String _apiKey = '';
   String _modelName = '';
   String _baseUrl = '';
-  String _backendUrl = '';
+
+  /// 首次从 SharedPreferences 读完前为 false，避免未加载完就提示「请配置 API」
+  bool _prefsLoaded = false;
 
   @override
   void initState() {
@@ -41,19 +58,59 @@ class _TranslateScreenState extends State<TranslateScreen> {
     _loadSettings();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    appRouteObserver.subscribe(this, ModalRoute.of(context)!);
+  }
+
+  @override
+  void dispose() {
+    _translateElapsedTimer?.cancel();
+    appRouteObserver.unsubscribe(this);
+    _textController.dispose();
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didPopNext() {
+    _loadSettings();
+  }
+
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
+    var trDepth = prefs.getInt('translate_reasoning_depth');
+    final trMigrated = prefs.getBool('translate_reasoning_4level') ?? false;
+    if (!trMigrated) {
+      if (trDepth == null) {
+        trDepth = 2;
+        await prefs.setInt('translate_reasoning_depth', trDepth);
+      } else if (trDepth >= 0 && trDepth <= 2) {
+        trDepth = trDepth + 1;
+        await prefs.setInt('translate_reasoning_depth', trDepth);
+      }
+      await prefs.setBool('translate_reasoning_4level', true);
+    }
+    final int resolvedTrDepth = ((trDepth ?? 2).clamp(0, 3) as num).toInt();
     setState(() {
+      _prefsLoaded = true;
       _apiKey = prefs.getString('api_key') ?? '';
       _modelName = prefs.getString('model_name') ?? '';
       _baseUrl = prefs.getString('base_url') ?? 'https://api.siliconflow.cn/v1';
-      _backendUrl = prefs.getString('backend_url') ?? '';
       _enableJyutping = prefs.getBool('enable_jyutping') ?? true;
       _enableTts = prefs.getBool('enable_tts') ?? true;
-      _apiService.backendBaseUrl =
-          _backendUrl.trim().isEmpty ? null : _backendUrl.trim();
+      _showTranslateReasoning = prefs.getBool('translate_show_reasoning') ?? true;
+      _translateReasoningDepth = resolvedTrDepth;
+      _apiService.backendBaseUrl = AppConstants.backendApiRoot;
     });
+  }
+
+  Future<void> _persistTranslateReasonPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('translate_show_reasoning', _showTranslateReasoning);
+    await prefs.setInt('translate_reasoning_depth', _translateReasoningDepth);
   }
 
   Future<void> _handleBackendUnavailableOnce() async {
@@ -67,7 +124,7 @@ class _TranslateScreenState extends State<TranslateScreen> {
           content: const Text(
             '无法连接后端以生成粤拼或语音。\n\n'
             '已自动关闭「粤拼标注」与「语音朗读」，之后将只使用模型翻译。\n'
-            '可在设置中重新开启并检查后端地址。',
+            '可在设置中重新开启，或检查网络与服务器是否可用。',
           ),
           actions: [
             TextButton(
@@ -103,11 +160,8 @@ class _TranslateScreenState extends State<TranslateScreen> {
     await _loadSettings();
 
     final needBackend = _enableJyutping || _enableTts;
-    if (needBackend && _backendUrl.trim().isEmpty) {
-      _showSnackBar('请填写后端地址，或在设置中关闭粤拼/语音', Colors.orange);
-      return;
-    }
 
+    _translateElapsedTimer?.cancel();
     setState(() {
       _isLoading = true;
       _extrasLoading = false;
@@ -118,17 +172,15 @@ class _TranslateScreenState extends State<TranslateScreen> {
       _note = null;
       _audioUrl = null;
       _slangAudioUrl = null;
+      _streamRaw = '';
+      _reasoningText = '';
+      _translateElapsedSec = 0;
+    });
+    _translateElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _translateElapsedSec++);
     });
 
-    try {
-      final modelResult = await _apiService.translateModelOnly(
-        text: _textController.text,
-        apiKey: _apiKey,
-        modelName: _modelName,
-        baseUrlApi: _baseUrl,
-        slangMode: _slangMode,
-      );
-
+    Future<void> applyModelResult(Map<String, dynamic> modelResult) async {
       final cantonese = (modelResult['cantonese'] ?? '').toString();
       final rawSlang = modelResult['slang'];
       final slangStr = rawSlang == null
@@ -142,6 +194,7 @@ class _TranslateScreenState extends State<TranslateScreen> {
         _cantonese = cantonese;
         _slang = slangStr;
         _note = (modelResult['note'] ?? '').toString();
+        _streamRaw = '';
         _isLoading = false;
         _extrasLoading = needBackend;
       });
@@ -195,9 +248,100 @@ class _TranslateScreenState extends State<TranslateScreen> {
           await _handleBackendUnavailableOnce();
         }
       }
+    }
+
+    Future<void> fallbackModelOnly() async {
+      final modelResult = await _apiService.translateModelOnly(
+        text: _textController.text,
+        apiKey: _apiKey,
+        modelName: _modelName,
+        baseUrlApi: _baseUrl,
+        slangMode: _slangMode,
+      );
+      await applyModelResult(modelResult);
+    }
+
+    try {
+      final contentBuf = StringBuffer();
+      final reasoningBuf = StringBuffer();
+      var streamFailed = false;
+
+      await for (final chunk in _apiService.translateModelStream(
+        text: _textController.text,
+        apiKey: _apiKey,
+        modelName: _modelName,
+        baseUrlApi: _baseUrl,
+        slangMode: _slangMode,
+        reasoningDepth: _translateReasoningDepth,
+      )) {
+        if (!mounted) return;
+        if (chunk.error != null) {
+          streamFailed = true;
+          break;
+        }
+        if (chunk.contentDelta != null) {
+          contentBuf.write(chunk.contentDelta);
+        }
+        if (chunk.reasoningDelta != null) {
+          reasoningBuf.write(chunk.reasoningDelta);
+        }
+        final full = contentBuf.toString();
+        setState(() {
+          _reasoningText = reasoningBuf.toString();
+          if (_slangMode) {
+            _streamRaw = full;
+            _cantonese = '';
+          } else {
+            _cantonese = full;
+            _streamRaw = '';
+          }
+        });
+        if (chunk.done) break;
+      }
+
+      if (!mounted) return;
+
+      if (streamFailed || contentBuf.isEmpty) {
+        await fallbackModelOnly();
+        return;
+      }
+
+      final fullText = contentBuf.toString().trim();
+      if (_slangMode) {
+        try {
+          String cleanText =
+              fullText.replaceAll('```json', '').replaceAll('```', '').trim();
+          final parsed = Map<String, dynamic>.from(jsonDecode(cleanText) as Map);
+          await applyModelResult({
+            'cantonese': (parsed['cantonese'] ?? '').toString(),
+            'slang': parsed['slang'],
+            'note': (parsed['note'] ?? '').toString(),
+          });
+        } catch (_) {
+          await applyModelResult({
+            'cantonese': fullText,
+            'slang': null,
+            'note': '',
+          });
+        }
+      } else {
+        await applyModelResult({
+          'cantonese': fullText,
+          'slang': null,
+          'note': '',
+        });
+      }
     } catch (e) {
-      if (mounted) _showSnackBar('翻译失败: $e', Colors.red);
+      if (mounted) {
+        try {
+          await fallbackModelOnly();
+        } catch (e2) {
+          _showSnackBar('翻译失败: $e2', Colors.red);
+        }
+      }
     } finally {
+      _translateElapsedTimer?.cancel();
+      _translateElapsedTimer = null;
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -245,6 +389,7 @@ class _TranslateScreenState extends State<TranslateScreen> {
         backgroundColor: Colors.transparent,
         appBar: AppBar(
           title: const Text('🗣️ 普通话转粤语', style: TextStyle(fontWeight: FontWeight.bold)),
+          foregroundColor: Colors.white,
           flexibleSpace: Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -254,6 +399,20 @@ class _TranslateScreenState extends State<TranslateScreen> {
           ),
           elevation: 0,
           centerTitle: true,
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.settings),
+              tooltip: '设置',
+              onPressed: () async {
+                await Navigator.push<void>(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (context) => const SettingsScreen(),
+                  ),
+                );
+              },
+            ),
+          ],
         ),
         body: SelectionArea(
           child: SingleChildScrollView(
@@ -264,7 +423,40 @@ class _TranslateScreenState extends State<TranslateScreen> {
                 const SizedBox(height: 20),
                 _buildTranslateButton(),
                 const SizedBox(height: 24),
-                if (_cantonese.isNotEmpty) _buildResultCard(),
+                if (_showTranslateReasoning && _reasoningText.isNotEmpty) ...[
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '🧠 模型思考（流式）',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
+                    color: Colors.grey.shade200,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: SelectableText(
+                        _reasoningText,
+                        style: TextStyle(
+                          fontSize: 13,
+                          height: 1.45,
+                          fontFamily: 'monospace',
+                          color: Colors.grey.shade900,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                if (_cantonese.isNotEmpty ||
+                    _streamRaw.isNotEmpty ||
+                    (_slang != null && _slang!.isNotEmpty) ||
+                    (_note != null && _note!.isNotEmpty))
+                  _buildResultCard(),
               ],
             ),
           ),
@@ -335,9 +527,77 @@ class _TranslateScreenState extends State<TranslateScreen> {
                 title: const Text('🔥 启用地道俚语/黑话', style: TextStyle(fontWeight: FontWeight.w600)),
                 subtitle: const Text('开启后会显示更地道的市井俚语', style: TextStyle(fontSize: 12)),
                 value: _slangMode,
-                onChanged: (value) => setState(() => _slangMode = value),
+                onChanged: _isLoading
+                    ? null
+                    : (value) => setState(() => _slangMode = value),
                 activeThumbColor: Colors.orange.shade700,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              margin: EdgeInsets.zero,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(left: 8, top: 8),
+                      child: Text(
+                        '模型输出',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                      title: const Text('显示思考过程'),
+                      subtitle: const Text(
+                        '若模型支持流式推理字段，将显示在翻译结果上方',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      value: _showTranslateReasoning,
+                      onChanged: _isLoading
+                          ? null
+                          : (v) {
+                              setState(() => _showTranslateReasoning = v);
+                              _persistTranslateReasonPrefs();
+                            },
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                      child: Row(
+                        children: [
+                          const Text('思考程度'),
+                          Expanded(
+                            child: Slider(
+                              value: _translateReasoningDepth.toDouble(),
+                              min: 0,
+                              max: 3,
+                              divisions: 3,
+                              label: ['关闭', '轻', '中', '重'][_translateReasoningDepth],
+                              onChanged: _isLoading
+                                  ? null
+                                  : (v) {
+                                      setState(
+                                        () => _translateReasoningDepth = v.round(),
+                                      );
+                                      _persistTranslateReasonPrefs();
+                                    },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Text(
+                        '「关闭」时降低温度与输出上限，优先速度；其余档位逐步提高。',
+                        style: TextStyle(fontSize: 11, color: Colors.black54),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -347,7 +607,7 @@ class _TranslateScreenState extends State<TranslateScreen> {
   }
 
   Widget _buildTranslateButton() {
-    final busy = _isLoading || _extrasLoading;
+    final busy = _isLoading || _extrasLoading || !_prefsLoaded;
     return Container(
       width: double.infinity,
       height: 56,
@@ -374,13 +634,30 @@ class _TranslateScreenState extends State<TranslateScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         ),
         child: busy
-            ? const SizedBox(
-                height: 24,
-                width: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 3,
-                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                ),
+            ? Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    height: 24,
+                    width: 24,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 3,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  ),
+                  if (_isLoading) ...[
+                    const SizedBox(width: 12),
+                    Text(
+                      '翻译中… ${_translateElapsedSec}s',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ],
+                ],
               )
             : const Row(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -421,13 +698,36 @@ class _TranslateScreenState extends State<TranslateScreen> {
                   backgroundColor: Colors.orange.shade100,
                 ),
               ),
-            _buildResultSection(
-              title: _slang != null && _slang!.isNotEmpty ? '📖 标准口语' : '✨ 粤语翻译',
-              content: _cantonese,
-              jyutping: _jyutping,
-              audioUrl: _audioUrl,
-              color: Colors.red,
-            ),
+            if (_streamRaw.isNotEmpty && _cantonese.isEmpty && _slangMode) ...[
+              Text(
+                '俚语模式 · 流式输出（JSON）',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey.shade700,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              SelectableText(
+                _streamRaw,
+                style: TextStyle(
+                  fontSize: 14,
+                  height: 1.5,
+                  fontFamily: 'monospace',
+                  color: Colors.grey.shade900,
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
+            if (_cantonese.isNotEmpty)
+              _buildResultSection(
+                title:
+                    _slang != null && _slang!.isNotEmpty ? '📖 标准口语' : '✨ 粤语翻译',
+                content: _cantonese,
+                jyutping: _jyutping,
+                audioUrl: _audioUrl,
+                color: Colors.red,
+              ),
             if (_slang != null && _slang!.isNotEmpty) ...[
               const SizedBox(height: 20),
               const Divider(thickness: 2),
@@ -560,12 +860,5 @@ class _TranslateScreenState extends State<TranslateScreen> {
         ],
       ],
     );
-  }
-
-  @override
-  void dispose() {
-    _textController.dispose();
-    _audioPlayer.dispose();
-    super.dispose();
   }
 }

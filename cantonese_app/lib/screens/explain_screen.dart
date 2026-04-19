@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../route_observer.dart';
 import '../services/api_service.dart';
+import 'settings_screen.dart';
 
 class ExplainScreen extends StatefulWidget {
   const ExplainScreen({super.key});
@@ -10,16 +14,28 @@ class ExplainScreen extends StatefulWidget {
   State<ExplainScreen> createState() => _ExplainScreenState();
 }
 
-class _ExplainScreenState extends State<ExplainScreen> {
+class _ExplainScreenState extends State<ExplainScreen> with RouteAware {
   final TextEditingController _textController = TextEditingController();
   final ApiService _apiService = ApiService();
 
   bool _isLoading = false;
   String _explanation = '';
+  String _reasoningText = '';
+
+  /// 是否展示「思考」文本（流式 reasoning_content 等）
+  bool _showReasoning = true;
+
+  /// 0 关闭 / 1 轻 / 2 中 / 3 重：影响流式请求的 temperature、max_tokens
+  int _reasoningDepth = 2;
+
+  int _elapsedSec = 0;
+  Timer? _elapsedTimer;
 
   String _apiKey = '';
   String _modelName = '';
   String _baseUrl = '';
+
+  bool _prefsLoaded = false;
 
   @override
   void initState() {
@@ -27,13 +43,54 @@ class _ExplainScreenState extends State<ExplainScreen> {
     _loadSettings();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    appRouteObserver.subscribe(this, ModalRoute.of(context)!);
+  }
+
+  @override
+  void dispose() {
+    appRouteObserver.unsubscribe(this);
+    _elapsedTimer?.cancel();
+    _textController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didPopNext() {
+    _loadSettings();
+  }
+
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    var depth = prefs.getInt('explain_reasoning_depth');
+    final migrated = prefs.getBool('explain_reasoning_4level') ?? false;
+    if (!migrated) {
+      if (depth == null) {
+        depth = 2;
+        await prefs.setInt('explain_reasoning_depth', depth);
+      } else if (depth >= 0 && depth <= 2) {
+        depth = depth + 1;
+        await prefs.setInt('explain_reasoning_depth', depth);
+      }
+      await prefs.setBool('explain_reasoning_4level', true);
+    }
+    final int resolvedDepth = ((depth ?? 2).clamp(0, 3) as num).toInt();
     setState(() {
+      _prefsLoaded = true;
       _apiKey = prefs.getString('api_key') ?? '';
       _modelName = prefs.getString('model_name') ?? '';
       _baseUrl = prefs.getString('base_url') ?? 'https://api.siliconflow.cn/v1';
+      _showReasoning = prefs.getBool('explain_show_reasoning') ?? true;
+      _reasoningDepth = resolvedDepth;
     });
+  }
+
+  Future<void> _persistExplainUiPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('explain_show_reasoning', _showReasoning);
+    await prefs.setInt('explain_reasoning_depth', _reasoningDepth);
   }
 
   Future<void> _explain() async {
@@ -51,32 +108,84 @@ class _ExplainScreenState extends State<ExplainScreen> {
       return;
     }
 
+    await _loadSettings();
+
+    _elapsedTimer?.cancel();
     setState(() {
       _isLoading = true;
       _explanation = '';
+      _reasoningText = '';
+      _elapsedSec = 0;
+    });
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _elapsedSec++);
     });
 
-    try {
+    final contentBuf = StringBuffer();
+    final reasoningBuf = StringBuffer();
+
+    Future<void> fallbackNonStream() async {
       final result = await _apiService.explain(
         text: _textController.text,
         apiKey: _apiKey,
         modelName: _modelName,
         baseUrlApi: _baseUrl,
       );
+      if (mounted) {
+        setState(() {
+          _explanation = (result['explanation'] ?? '').toString();
+        });
+      }
+    }
 
-      setState(() {
-        _explanation = result['explanation'] ?? '';
-      });
+    try {
+      var streamFailed = false;
+      await for (final chunk in _apiService.explainStream(
+        text: _textController.text,
+        apiKey: _apiKey,
+        modelName: _modelName,
+        baseUrlApi: _baseUrl,
+        reasoningDepth: _reasoningDepth,
+      )) {
+        if (!mounted) return;
+        if (chunk.error != null) {
+          streamFailed = true;
+          break;
+        }
+        if (chunk.contentDelta != null) {
+          contentBuf.write(chunk.contentDelta);
+        }
+        if (chunk.reasoningDelta != null) {
+          reasoningBuf.write(chunk.reasoningDelta);
+        }
+        setState(() {
+          _explanation = contentBuf.toString();
+          _reasoningText = reasoningBuf.toString();
+        });
+        if (chunk.done) break;
+      }
+
+      if (!mounted) return;
+
+      // 流失败或正文始终为空时，回退到非流式请求（部分服务商不支持 stream）
+      if (streamFailed || contentBuf.isEmpty) {
+        await fallbackNonStream();
+      }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('解释失败: $e')),
-        );
+        try {
+          await fallbackNonStream();
+        } catch (e2) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('解释失败: $e2')),
+          );
+        }
       }
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      _elapsedTimer?.cancel();
+      _elapsedTimer = null;
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -84,6 +193,7 @@ class _ExplainScreenState extends State<ExplainScreen> {
     setState(() {
       _textController.clear();
       _explanation = '';
+      _reasoningText = '';
     });
   }
 
@@ -94,6 +204,20 @@ class _ExplainScreenState extends State<ExplainScreen> {
         title: const Text('粤语解释'),
         backgroundColor: Colors.red,
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: '设置',
+            onPressed: () async {
+              await Navigator.push<void>(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (context) => const SettingsScreen(),
+                ),
+              );
+            },
+          ),
+        ],
       ),
       body: SelectionArea(
         child: SingleChildScrollView(
@@ -111,6 +235,69 @@ class _ExplainScreenState extends State<ExplainScreen> {
               ),
               maxLines: 3,
             ),
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(left: 8, top: 8),
+                      child: Text(
+                        '生成选项',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                      title: const Text('显示思考过程'),
+                      subtitle: const Text(
+                        '若模型支持流式推理字段，会显示在下方灰色区域（非所有模型都有）',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                      value: _showReasoning,
+                      onChanged: _isLoading
+                          ? null
+                          : (v) {
+                              setState(() => _showReasoning = v);
+                              _persistExplainUiPrefs();
+                            },
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                      child: Row(
+                        children: [
+                          const Text('思考程度'),
+                          Expanded(
+                            child: Slider(
+                              value: _reasoningDepth.toDouble(),
+                              min: 0,
+                              max: 3,
+                              divisions: 3,
+                              label: ['关闭', '轻', '中', '重'][_reasoningDepth],
+                              onChanged: _isLoading
+                                  ? null
+                                  : (v) {
+                                      setState(() => _reasoningDepth = v.round());
+                                      _persistExplainUiPrefs();
+                                    },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Text(
+                        '「关闭」时降低温度与输出上限，优先速度；其余档位逐步提高。',
+                        style: TextStyle(fontSize: 11, color: Colors.black54),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
             const SizedBox(height: 16),
 
             // 按钮行
@@ -118,23 +305,44 @@ class _ExplainScreenState extends State<ExplainScreen> {
               children: [
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: _isLoading ? null : _explain,
+                    onPressed: (_isLoading || !_prefsLoaded) ? null : _explain,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.red,
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                     ),
-                    child: _isLoading
+                    child: !_prefsLoaded && !_isLoading
                         ? const SizedBox(
-                            height: 20,
-                            width: 20,
+                            height: 22,
+                            width: 22,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
                               valueColor:
                                   AlwaysStoppedAnimation<Color>(Colors.white),
                             ),
                           )
-                        : const Text('获取解释', style: TextStyle(fontSize: 16)),
+                        : _isLoading
+                            ? Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const SizedBox(
+                                    height: 20,
+                                    width: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(
+                                          Colors.white),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Text(
+                                    '生成中… ${_elapsedSec}s',
+                                    style: const TextStyle(fontSize: 16),
+                                  ),
+                                ],
+                              )
+                            : const Text('获取解释', style: TextStyle(fontSize: 16)),
                   ),
                 ),
                 const SizedBox(width: 16),
@@ -154,6 +362,33 @@ class _ExplainScreenState extends State<ExplainScreen> {
             ),
 
             const SizedBox(height: 24),
+
+            if (_showReasoning && _reasoningText.isNotEmpty) ...[
+              const Text(
+                '🧠 模型思考（流式）',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Card(
+                color: Colors.grey.shade200,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: SelectableText(
+                    _reasoningText,
+                    style: TextStyle(
+                      fontSize: 13,
+                      height: 1.45,
+                      fontFamily: 'monospace',
+                      color: Colors.grey.shade900,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
 
             // 结果显示
             if (_explanation.isNotEmpty) ...[
@@ -197,7 +432,7 @@ class _ExplainScreenState extends State<ExplainScreen> {
             ],
 
             // 使用说明
-            if (_explanation.isEmpty && !_isLoading) ...[
+            if (_explanation.isEmpty && _reasoningText.isEmpty && !_isLoading) ...[
               const SizedBox(height: 24),
               Container(
                 padding: const EdgeInsets.all(16),
@@ -302,11 +537,5 @@ class _ExplainScreenState extends State<ExplainScreen> {
         ],
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _textController.dispose();
-    super.dispose();
   }
 }

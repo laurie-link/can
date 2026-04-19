@@ -1,6 +1,6 @@
 {
-    "name": "cantonese_app",
-    "short_name": "cantonese_app",
+    "name": "粤学通",
+    "short_name": "粤学通",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

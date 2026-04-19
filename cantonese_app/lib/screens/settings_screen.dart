@@ -12,7 +12,6 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _apiKeyController = TextEditingController();
   final TextEditingController _baseUrlController = TextEditingController();
-  final TextEditingController _backendUrlController = TextEditingController();
   final ApiService _apiService = ApiService();
 
   bool _isSaving = false;
@@ -34,7 +33,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _apiKeyController.text = prefs.getString('api_key') ?? '';
       _baseUrlController.text = prefs.getString('base_url') ?? 'https://api.siliconflow.cn/v1';
-      _backendUrlController.text = prefs.getString('backend_url') ?? '';
       _enableJyutping = prefs.getBool('enable_jyutping') ?? true;
       _enableTts = prefs.getBool('enable_tts') ?? true;
       _selectedModel = prefs.getString('model_name');
@@ -150,7 +148,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('api_key', _apiKeyController.text);
       await prefs.setString('base_url', _baseUrlController.text);
-      await prefs.setString('backend_url', _backendUrlController.text.trim());
       await prefs.setBool('enable_jyutping', _enableJyutping);
       await prefs.setBool('enable_tts', _enableTts);
       await prefs.setString('model_name', _selectedModel!);
@@ -199,15 +196,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 color: Colors.blue[50],
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Column(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  const Row(
                     children: [
                       Icon(Icons.info_outline, color: Colors.blue),
                       SizedBox(width: 8),
                       Text(
-                        'API 配置说明',
+                        'API 与后端说明',
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
@@ -215,15 +212,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ],
                   ),
-                  SizedBox(height: 12),
+                  const SizedBox(height: 12),
                   Text(
-                    '本应用需要调用 AI API 才能使用翻译和解释功能。\n'
-                    '翻译页的粤拼与朗读可在下方开关中单独开启；开启时需要可访问的自建后端（FastAPI）。\n\n'
-                    '支持 OpenAI 兼容的 API 服务，如：\n'
+                    '本应用需要调用「OpenAI 兼容」的 AI API（下方 Base URL + API Key）才能使用翻译与解释。\n'
+                    '翻译页的粤拼与朗读、注音页的注音与语音由应用内置连接的粤语助手后端提供，无需在设置中填写地址。\n\n'
+                    '支持的大模型网关示例：\n'
                     '• SiliconFlow (https://api.siliconflow.cn/v1)\n'
                     '• OpenAI (https://api.openai.com/v1)\n'
-                    '• 其他兼容服务',
-                    style: TextStyle(fontSize: 14, height: 1.5),
+                    '• 其他兼容 /chat/completions 的服务',
+                    style: const TextStyle(fontSize: 14, height: 1.5),
                   ),
                 ],
               ),
@@ -243,22 +240,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
 
             const SizedBox(height: 16),
-
-            // 后端服务（粤拼 + 语音）
-            TextField(
-              controller: _backendUrlController,
-              decoration: InputDecoration(
-                labelText: '后端服务地址（粤拼 / 语音）',
-                border: const OutlineInputBorder(),
-                hintText: 'http://154.217.244.39:6783',
-                prefixIcon: const Icon(Icons.cloud),
-                helperText: (_enableJyutping || _enableTts)
-                    ? '需可访问 /api/jyutping 与 /api/audio；与仓库 backend 部署一致'
-                    : '已关闭粤拼与语音时可不填',
-              ),
-            ),
-
-            const SizedBox(height: 12),
 
             SwitchListTile(
               title: const Text('翻译页：粤拼标注', style: TextStyle(fontWeight: FontWeight.w600)),
@@ -409,8 +390,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: 12),
                     _buildConfigItem('Base URL', _baseUrlController.text),
-                    if (_backendUrlController.text.isNotEmpty)
-                      _buildConfigItem('后端', _backendUrlController.text),
                     _buildConfigItem('API Key', '${_apiKeyController.text.substring(0, 8)}...'),
                     _buildConfigItem('模型', _selectedModel ?? '未选择'),
                   ],
@@ -438,11 +417,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   SizedBox(height: 8),
                   Text(
-                    '粤语学习助手 v1.0.0\n\n'
+                    '粤学通 v1.0.0\n\n'
                     '功能：\n'
                     '• 普通话转粤语（模型）\n'
                     '• 可选：粤拼（后端）与朗读（后端）\n'
-                    '• 粤语解释（模型）',
+                    '• 粤语解释（模型，支持流式与思考展示）\n'
+                    '• 注音页（仅后端粤拼与语音）',
                     style: TextStyle(fontSize: 14, height: 1.5),
                   ),
                 ],
@@ -489,7 +469,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _apiKeyController.dispose();
     _baseUrlController.dispose();
-    _backendUrlController.dispose();
     super.dispose();
   }
 }
