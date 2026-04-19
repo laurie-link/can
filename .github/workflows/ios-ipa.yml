@@ -5,7 +5,7 @@
 # - 免费 Apple ID 常见限制：约 7 天需重签、同时侧载数量限制等，这是苹果策略，与 CI 无关。
 # - 本 workflow **不需要**任何 APPLE_* Secrets，也不需要 99 美金开发者计划即可产出可供侧载工具使用的 ipa 包。
 #
-# 使用：GitHub Actions → 手动运行本 workflow；完成后在 Artifacts 下载 cantonese-unsigned.ipa
+# 触发：推送到 main、推送 v* 标签、或在 Actions 里手动运行；完成后在 Artifacts 下载 cantonese-unsigned.ipa
 #
 # 项目路径：仓库根目录下的 cantonese_app/
 
@@ -14,6 +14,8 @@ name: Build unsigned iOS IPA (Sideloadly)
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
