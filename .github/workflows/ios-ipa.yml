@@ -1,0 +1,66 @@
+# 无付费开发者证书：构建「未签名」IPA，交给 Sideloadly / AltStore 等在用户电脑上用 Apple ID 安装时再签名。
+#
+# 说明（重要）：
+# - iOS 设备不能安装“完全裸奔”的包；Sideloadly 会在安装时用**用户自己的 Apple ID（免费亦可）**给 IPA 签名。
+# - 免费 Apple ID 常见限制：约 7 天需重签、同时侧载数量限制等，这是苹果策略，与 CI 无关。
+# - 本 workflow **不需要**任何 APPLE_* Secrets，也不需要 99 美金开发者计划即可产出可供侧载工具使用的 ipa 包。
+#
+# 使用：GitHub Actions → 手动运行本 workflow；完成后在 Artifacts 下载 cantonese-unsigned.ipa
+#
+# 项目路径：仓库根目录下的 cantonese_app/
+
+name: Build unsigned iOS IPA (Sideloadly)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  unsigned-ipa:
+    runs-on: macos-latest
+    env:
+      FLUTTER_PROJECT_DIR: cantonese_app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Build iOS (no codesign) & pack IPA
+        working-directory: ${{ env.FLUTTER_PROJECT_DIR }}
+        run: |
+          set -e
+          flutter --version
+          flutter pub get
+          cd ios && pod install && cd ..
+          flutter build ios --release --no-codesign
+
+          APP=$(find build/ios -name "Runner.app" -type d | head -n 1)
+          if [ -z "$APP" ]; then
+            echo "::error::找不到 Runner.app，请检查 flutter build ios 输出目录"
+            find build/ios -maxdepth 4 -type d
+            exit 1
+          fi
+          echo "Using: $APP"
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+
+          rm -f cantonese-unsigned.ipa
+          zip -r cantonese-unsigned.ipa Payload
+          ls -la cantonese-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: cantonese-unsigned-ipa
+          path: ${{ env.FLUTTER_PROJECT_DIR }}/cantonese-unsigned.ipa
+          if-no-files-found: error

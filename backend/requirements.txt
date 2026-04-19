@@ -1,0 +1,9 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+pycantonese>=3.4.0
+ToJyutping>=3.2.0
+edge-tts>=6.1.0
+requests>=2.25.1
+zhconv>=1.4.0
+python-multipart>=0.0.6

@@ -1,0 +1,23 @@
+# 仓库根目录（与 cantonese_app、backend 子目录内 .gitignore 叠加生效）
+
+# IDE / 本地
+.idea/
+*.iml
+.vscode/
+.cursor/
+
+# 若曾在根目录建过虚拟环境
+venv/
+env/
+.venv/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Claude 本地（可能含密钥）
+.claude/
